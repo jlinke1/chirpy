@@ -3,6 +3,8 @@ package main
 import (
 	"log"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func main() {
@@ -10,12 +12,14 @@ func main() {
 	const port = "8080"
 
 	apiCfg := apiConfig{}
-	mux := http.NewServeMux()
-	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filePathRoot)))))
-	mux.HandleFunc("/healthz", healthzHandler)
-	mux.HandleFunc("/metrics", apiCfg.hitsHandler)
-	mux.HandleFunc("/reset", apiCfg.resetHandler)
-	logMux := middlewareLog(mux)
+	r := chi.NewRouter()
+	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filePathRoot))))
+	r.Handle("/app/*", fsHandler)
+	r.Handle("/app", fsHandler)
+	r.Get("/healthz", healthzHandler)
+	r.Get("/metrics", apiCfg.hitsHandler)
+	r.HandleFunc("/reset", apiCfg.resetHandler)
+	logMux := middlewareLog(r)
 	corsMux := middlewareCors(logMux)
 
 	srv := &http.Server{
