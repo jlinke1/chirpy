@@ -24,6 +24,11 @@ func main() {
 
 	r.Mount("/api", apiRouter)
 
+	adminRouter := chi.NewRouter()
+	adminRouter.Get("/metrics", apiCfg.hitsHandler)
+
+	r.Mount("/admin", adminRouter)
+
 	logMux := middlewareLog(r)
 	corsMux := middlewareCors(logMux)
 
