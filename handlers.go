@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 )
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
@@ -35,53 +36,65 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-	type chirpMessage struct {
+	type parameters struct {
 		Body string `json:"body"`
+	}
+	type returnVals struct {
+		CleanedBody string `json:"cleaned_body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
-	chirp := chirpMessage{}
-	err := decoder.Decode(&chirp)
+	params := parameters{}
+	err := decoder.Decode(&params)
 
+	if err != nil {
+		log.Printf("Error decoding Chirp: %s", err)
+		respondWithError(w, http.StatusInternalServerError, "could not decode Chirp")
+		return
+	}
+
+	if len(params.Body) > 140 {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	// using this as a set! for fast membership checks
+	badWords := map[string]struct{}{"kerfuffle": {}, "sharbert": {}, "fornax": {}}
+	cleanedChirp := replaceBadWords(params.Body, badWords)
+	respondWithJSON(w, http.StatusOK, returnVals{cleanedChirp})
+
+}
+
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	if code > 499 {
+		log.Printf("Responding with 5XX error: %s", msg)
+	}
 	type errorMessage struct {
 		Error string `json:"error"`
 	}
+	respondWithJSON(w, code, errorMessage{msg})
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	dat, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Error decoding Chirp: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		respBody := errorMessage{Error: "could not decode Chirp"}
-		dat, err := json.Marshal(respBody)
-		if err != nil {
-			log.Printf("Could not marshal error message: %s", err)
-			return
-		}
-		w.Write(dat)
-		w.Header().Set("Content-Type", "application/json")
-		return
-	}
-	if len(chirp.Body) > 140 {
-		respBody := errorMessage{Error: "Chirp is too long"}
-		w.WriteHeader(http.StatusBadRequest)
-		dat, err := json.Marshal(respBody)
-		if err != nil {
-			log.Printf("Could not marhsal error message: %s", err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(dat)
-		return
-	}
-	type validResponse struct {
-		Valid bool `json:"valid"`
-	}
-	respBody := validResponse{Valid: true}
-	dat, err := json.Marshal(respBody)
-	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+
+	w.WriteHeader(code)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(dat)
+}
 
+func replaceBadWords(chirp string, badWords map[string]struct{}) string {
+	wordsInChirp := strings.Fields(chirp)
+	for i, word := range wordsInChirp {
+		wordLower := strings.ToLower(word)
+		if _, ok := badWords[wordLower]; ok {
+			wordsInChirp[i] = "****"
+		}
+	}
+	return strings.Join(wordsInChirp, " ")
 }
