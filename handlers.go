@@ -3,9 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+
+	"github.com/jlinke1/chirpy/internal/database"
 )
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
@@ -35,12 +39,11 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Hits reset to 0"))
 }
 
-func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
+var mut sync.Mutex
+
+func postChirpsHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body string `json:"body"`
-	}
-	type returnVals struct {
-		CleanedBody string `json:"cleaned_body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -61,7 +64,35 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	// using this as a set! for fast membership checks
 	badWords := map[string]struct{}{"kerfuffle": {}, "sharbert": {}, "fornax": {}}
 	cleanedChirp := replaceBadWords(params.Body, badWords)
-	respondWithJSON(w, http.StatusOK, returnVals{cleanedChirp})
+
+	mut.Lock()
+	allChirps, err := database.LoadChirpsDB(database.DB)
+	if err != nil && err != io.EOF {
+		respondWithError(w, http.StatusInternalServerError, "could not load chirps")
+	}
+	newID := 1
+	if len(allChirps) > 0 {
+		newID = allChirps[len(allChirps)-1].ID + 1
+	}
+	newChirp := database.Chirp{ID: newID, Body: cleanedChirp}
+	allChirps = append(allChirps, newChirp)
+	err = database.SaveChirpsDB(allChirps, database.DB)
+	mut.Unlock()
+	if err != nil {
+		log.Printf("could not save chirps: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "could not save new chirp")
+	}
+	respondWithJSON(w, http.StatusCreated, newChirp)
+
+}
+
+func getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	chirps, err := database.LoadChirpsDB(database.DB)
+	if err != nil && err != io.EOF {
+		log.Printf("could not load chirps: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "could not load chirps")
+	}
+	respondWithJSON(w, http.StatusOK, chirps)
 
 }
 

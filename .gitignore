@@ -23,3 +23,6 @@ go.work
 
 # output binary
 out
+
+# database
+database.json
