@@ -26,6 +26,21 @@ func LoadChirpsDB(db string) ([]Chirp, error) {
 	return chirps, nil
 }
 
+func GetSingleChirp(chirpID int, db string) (Chirp, error) {
+	chirps, err := LoadChirpsDB(db)
+	if err != nil {
+		return Chirp{}, err
+	}
+
+	for _, c := range chirps {
+		if c.ID == chirpID {
+			return c, nil
+		}
+	}
+
+	return Chirp{}, nil
+}
+
 func SaveChirpsDB(chirps []Chirp, db string) error {
 	dat, err := json.Marshal(chirps)
 	if err != nil {

@@ -6,9 +6,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jlinke1/chirpy/internal/database"
 )
 
@@ -91,9 +93,30 @@ func getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil && err != io.EOF {
 		log.Printf("could not load chirps: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "could not load chirps")
+		return
 	}
 	respondWithJSON(w, http.StatusOK, chirps)
 
+}
+
+func getSingleChirpHandler(w http.ResponseWriter, r *http.Request) {
+	chirpID, err := strconv.Atoi(chi.URLParam(r, "chirpID"))
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "invalid chirpID")
+	}
+
+	chirp, err := database.GetSingleChirp(chirpID, database.DB)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "couldn't get Chirp from DB")
+		return
+	}
+
+	if (chirp == database.Chirp{}) {
+		respondWithError(w, http.StatusNotFound, "Chirp does not exist")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, chirp)
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
