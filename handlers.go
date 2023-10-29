@@ -2,8 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -43,7 +43,7 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 
 var mut sync.Mutex
 
-func postChirpsHandler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) postChirpsHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body string `json:"body"`
 	}
@@ -67,30 +67,19 @@ func postChirpsHandler(w http.ResponseWriter, r *http.Request) {
 	badWords := map[string]struct{}{"kerfuffle": {}, "sharbert": {}, "fornax": {}}
 	cleanedChirp := replaceBadWords(params.Body, badWords)
 
-	mut.Lock()
-	allChirps, err := database.LoadChirpsDB(database.DB)
-	if err != nil && err != io.EOF {
-		respondWithError(w, http.StatusInternalServerError, "could not load chirps")
-	}
-	newID := 1
-	if len(allChirps) > 0 {
-		newID = allChirps[len(allChirps)-1].ID + 1
-	}
-	newChirp := database.Chirp{ID: newID, Body: cleanedChirp}
-	allChirps = append(allChirps, newChirp)
-	err = database.SaveChirpsDB(allChirps, database.DB)
-	mut.Unlock()
+	newChirp, err := cfg.DB.CreateChirp(cleanedChirp)
 	if err != nil {
 		log.Printf("could not save chirps: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "could not save new chirp")
 	}
+
 	respondWithJSON(w, http.StatusCreated, newChirp)
 
 }
 
-func getChirpsHandler(w http.ResponseWriter, r *http.Request) {
-	chirps, err := database.LoadChirpsDB(database.DB)
-	if err != nil && err != io.EOF {
+func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.DB.GetChirps()
+	if err != nil {
 		log.Printf("could not load chirps: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "could not load chirps")
 		return
@@ -99,25 +88,39 @@ func getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func getSingleChirpHandler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) getSingleChirpHandler(w http.ResponseWriter, r *http.Request) {
 	chirpID, err := strconv.Atoi(chi.URLParam(r, "chirpID"))
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "invalid chirpID")
 	}
 
-	chirp, err := database.GetSingleChirp(chirpID, database.DB)
+	chirp, err := cfg.DB.GetChirp(chirpID)
+	if errors.Is(err, database.ErrNotExist) {
+		respondWithError(w, http.StatusNotFound, "Chirp does not exist")
+		return
+	}
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "couldn't get Chirp from DB")
 		return
 	}
 
-	if (chirp == database.Chirp{}) {
-		respondWithError(w, http.StatusNotFound, "Chirp does not exist")
-		return
-	}
-
 	respondWithJSON(w, http.StatusOK, chirp)
 }
+
+// func postUserHandler(w http.ResponseWriter, r *http.Request) {
+// 	type parameters struct {
+// 		Email string `json:"email"`
+// 	}
+//
+// 	decoder := json.NewDecoder(r.Body)
+// 	params := parameters{}
+// 	err := decoder.Decode(&params)
+// 	if err != nil {
+// 		respondWithError(w, http.StatusInternalServerError, "could not decode Email address")
+// 		return
+// 	}
+//
+// }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
 	if code > 499 {

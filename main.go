@@ -5,13 +5,27 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jlinke1/chirpy/internal/database"
 )
+
+type apiConfig struct {
+	fileServerHits int
+	DB             *database.DB
+}
 
 func main() {
 	const filePathRoot = "."
 	const port = "8080"
 
-	apiCfg := apiConfig{}
+	db, err := database.NewDB("database.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	apiCfg := apiConfig{
+		fileServerHits: 0,
+		DB:             db,
+	}
 	r := chi.NewRouter()
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filePathRoot))))
 	r.Handle("/app/*", fsHandler)
@@ -20,9 +34,9 @@ func main() {
 	apiRouter := chi.NewRouter()
 	apiRouter.Get("/healthz", healthzHandler)
 	apiRouter.HandleFunc("/reset", apiCfg.resetHandler)
-	apiRouter.Post("/chirps", postChirpsHandler)
-	apiRouter.Get("/chirps", getChirpsHandler)
-	apiRouter.Get("/chirps/{chirpID}", getSingleChirpHandler)
+	apiRouter.Post("/chirps", apiCfg.postChirpsHandler)
+	apiRouter.Get("/chirps", apiCfg.getChirpsHandler)
+	apiRouter.Get("/chirps/{chirpID}", apiCfg.getSingleChirpHandler)
 	r.Mount("/api", apiRouter)
 
 	adminRouter := chi.NewRouter()
