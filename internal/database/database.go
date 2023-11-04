@@ -60,6 +60,27 @@ func (db *DB) CreateChirp(body string) (Chirp, error) {
 	return chirp, nil
 }
 
+func (db *DB) CreateUser(email string) (User, error) {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return User{}, fmt.Errorf("CreateUser: could not load db: %w", err)
+	}
+
+	id := len(dbStructure.Users) + 1
+	user := User{
+		ID:    id,
+		Email: email,
+	}
+	dbStructure.Users[id] = user
+
+	err = db.writeDB(dbStructure)
+	if err != nil {
+		return User{}, fmt.Errorf("CreateUser: could not write db: %w", err)
+	}
+	return user, nil
+
+}
+
 func (db *DB) createDB() error {
 	dbstructure := DBStructure{
 		Chirps: map[int]Chirp{},

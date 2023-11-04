@@ -51,9 +51,8 @@ func (cfg *apiConfig) postChirpsHandler(w http.ResponseWriter, r *http.Request) 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
-
 	if err != nil {
-		log.Printf("Error decoding Chirp: %s", err)
+		log.Printf("Error decoding Chirp: %v\n", err)
 		respondWithError(w, http.StatusInternalServerError, "could not decode Chirp")
 		return
 	}
@@ -69,12 +68,32 @@ func (cfg *apiConfig) postChirpsHandler(w http.ResponseWriter, r *http.Request) 
 
 	newChirp, err := cfg.DB.CreateChirp(cleanedChirp)
 	if err != nil {
-		log.Printf("could not save chirps: %v", err)
+		log.Printf("could not save chirps: %v\n", err)
 		respondWithError(w, http.StatusInternalServerError, "could not save new chirp")
 	}
 
 	respondWithJSON(w, http.StatusCreated, newChirp)
+}
 
+func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Printf("error decoding User: %v\n", err)
+	}
+
+	newUser, err := cfg.DB.CreateUser(params.Email)
+	if err != nil {
+		log.Printf("could not save User: %v\n", err)
+		respondWithError(w, http.StatusInternalServerError, "could not save new user")
+	}
+
+	respondWithJSON(w, http.StatusCreated, newUser)
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
