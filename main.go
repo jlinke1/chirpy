@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jlinke1/chirpy/internal/database"
@@ -14,10 +17,20 @@ type apiConfig struct {
 }
 
 func main() {
+	dbFileName := "database.json"
+	dbg := flag.Bool("debug", false, "Enable debug mode")
+	flag.Parse()
+	if *dbg {
+		err := os.Remove(dbFileName)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Fatal(err)
+		}
+	}
+
 	const filePathRoot = "."
 	const port = "8080"
 
-	db, err := database.NewDB("database.json")
+	db, err := database.NewDB(dbFileName)
 	if err != nil {
 		log.Fatal(err)
 	}
