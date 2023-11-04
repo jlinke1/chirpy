@@ -14,10 +14,11 @@ import (
 type apiConfig struct {
 	fileServerHits int
 	DB             *database.DB
+	jwtSecret      string
 }
 
 func main() {
-	dbFileName := "database.json"
+	const dbFileName = "database.json"
 	dbg := flag.Bool("debug", false, "Enable debug mode")
 	flag.Parse()
 	if *dbg {
@@ -35,9 +36,11 @@ func main() {
 		log.Fatal(err)
 	}
 
+	jwtSecret := os.Getenv("JWT_SECRET")
 	apiCfg := apiConfig{
 		fileServerHits: 0,
 		DB:             db,
+		jwtSecret:      jwtSecret,
 	}
 	r := chi.NewRouter()
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filePathRoot))))
@@ -51,6 +54,7 @@ func main() {
 	apiRouter.Get("/chirps", apiCfg.getChirpsHandler)
 	apiRouter.Get("/chirps/{chirpID}", apiCfg.getSingleChirpHandler)
 	apiRouter.Post("/users", apiCfg.postUsersHandler)
+	apiRouter.Post("/login", apiCfg.postLoginHandler)
 	r.Mount("/api", apiRouter)
 
 	adminRouter := chi.NewRouter()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/crypto/bcrypt"
 	"os"
 	"sync"
 )
@@ -16,8 +17,8 @@ type DB struct {
 }
 
 type DBStructure struct {
-	Chirps map[int]Chirp `json:"chirps"`
-	Users  map[int]User  `json:"users"`
+	Chirps map[int]Chirp            `json:"chirps"`
+	Users  map[int]UserWithPassword `json:"users"`
 }
 
 type Chirp struct {
@@ -28,6 +29,26 @@ type Chirp struct {
 type User struct {
 	ID    int    `json:"id"`
 	Email string `json:"email"`
+}
+
+type UserWithPassword struct {
+	ID       int    `json:"id"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type UserWithToken struct {
+	ID    int    `json:"id"`
+	Email string `json:"email"`
+	Token string `json:"token"`
+}
+
+func (u UserWithPassword) GetUserWithoutPW() User {
+	return User{ID: u.ID, Email: u.Email}
+}
+
+func (u UserWithPassword) GetUserWithToken(token string) UserWithToken {
+	return UserWithToken{ID: u.ID, Email: u.Email, Token: token}
 }
 
 func NewDB(path string) (*DB, error) {
@@ -60,31 +81,37 @@ func (db *DB) CreateChirp(body string) (Chirp, error) {
 	return chirp, nil
 }
 
-func (db *DB) CreateUser(email string) (User, error) {
+func (db *DB) CreateUser(email string, password string) (User, error) {
 	dbStructure, err := db.loadDB()
 	if err != nil {
 		return User{}, fmt.Errorf("CreateUser: could not load db: %w", err)
 	}
 
-	id := len(dbStructure.Users) + 1
-	user := User{
-		ID:    id,
-		Email: email,
+	encryptedPW, err := bcrypt.GenerateFromPassword([]byte(password), 10)
+	if err != nil {
+		return User{}, fmt.Errorf("CreateUser: failed to encrypt password: %w", err)
 	}
-	dbStructure.Users[id] = user
+
+	id := len(dbStructure.Users) + 1
+	userPW := UserWithPassword{
+		ID:       id,
+		Email:    email,
+		Password: string(encryptedPW),
+	}
+	dbStructure.Users[id] = userPW
 
 	err = db.writeDB(dbStructure)
 	if err != nil {
 		return User{}, fmt.Errorf("CreateUser: could not write db: %w", err)
 	}
-	return user, nil
+	return userPW.GetUserWithoutPW(), nil
 
 }
 
 func (db *DB) createDB() error {
 	dbstructure := DBStructure{
 		Chirps: map[int]Chirp{},
-		Users:  map[int]User{},
+		Users:  map[int]UserWithPassword{},
 	}
 	return db.writeDB(dbstructure)
 }
@@ -170,6 +197,20 @@ func (db DB) GetChirp(chirpID int) (Chirp, error) {
 	}
 
 	return chirp, nil
+}
+
+func (db DB) GetUserByMail(email string) (UserWithPassword, error) {
+	data, err := db.Load()
+	if err != nil {
+		return UserWithPassword{}, fmt.Errorf("GetUserByMail: could not load data: %w", err)
+	}
+
+	for _, user := range data.Users {
+		if user.Email == email {
+			return user, nil
+		}
+	}
+	return UserWithPassword{}, ErrNotExist
 }
 
 func (db DB) Save(chirps []Chirp) error {

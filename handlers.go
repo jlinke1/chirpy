@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/jlinke1/chirpy/internal/database"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
@@ -40,8 +42,6 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	cfg.fileServerHits = 0
 	w.Write([]byte("Hits reset to 0"))
 }
-
-var mut sync.Mutex
 
 func (cfg *apiConfig) postChirpsHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
@@ -77,7 +77,8 @@ func (cfg *apiConfig) postChirpsHandler(w http.ResponseWriter, r *http.Request) 
 
 func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -85,15 +86,69 @@ func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
 	err := decoder.Decode(&params)
 	if err != nil {
 		log.Printf("error decoding User: %v\n", err)
+		respondWithError(w, http.StatusInternalServerError, "could not decode user")
+		return
 	}
 
-	newUser, err := cfg.DB.CreateUser(params.Email)
+	if err != nil {
+		log.Printf("decoding failed: %v\n", err)
+		respondWithError(w, http.StatusBadRequest, "failed to decode user provided params")
+		return
+	}
+	newUser, err := cfg.DB.CreateUser(params.Email, params.Password)
 	if err != nil {
 		log.Printf("could not save User: %v\n", err)
 		respondWithError(w, http.StatusInternalServerError, "could not save new user")
+		return
 	}
 
 	respondWithJSON(w, http.StatusCreated, newUser)
+}
+
+func (cfg *apiConfig) postLoginHandler(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Printf("decoding failed: %v\n", err)
+		respondWithError(w, http.StatusBadRequest, "failed to decode user provided params")
+		return
+	}
+
+	user, err := cfg.DB.GetUserByMail(params.Email)
+	if err != nil {
+		log.Printf("Could not get user: %v\n", err)
+		if errors.Is(err, database.ErrNotExist) {
+			respondWithError(w, http.StatusNotFound, fmt.Sprintf("User with Email %s does not exist", params.Email))
+			return
+		}
+		respondWithError(w, http.StatusInternalServerError, "could not get user")
+		return
+	}
+
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(params.Password))
+	if err != nil {
+		log.Printf("password comparison failed: %v", err)
+		respondWithError(w, http.StatusUnauthorized, "wrong password")
+		return
+	}
+	expiresInSeconds := params.ExpiresInSeconds
+	if expiresInSeconds == 0 {
+		expiresInSeconds = 24 * 60 * 60
+	}
+	token, err := createJWT(cfg.jwtSecret, user.ID, expiresInSeconds)
+	if err != nil {
+		log.Printf("failed to create token: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "token creation failed")
+	}
+
+	respondWithJSON(w, http.StatusOK, user.GetUserWithToken(token))
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
@@ -125,21 +180,6 @@ func (cfg *apiConfig) getSingleChirpHandler(w http.ResponseWriter, r *http.Reque
 
 	respondWithJSON(w, http.StatusOK, chirp)
 }
-
-// func postUserHandler(w http.ResponseWriter, r *http.Request) {
-// 	type parameters struct {
-// 		Email string `json:"email"`
-// 	}
-//
-// 	decoder := json.NewDecoder(r.Body)
-// 	params := parameters{}
-// 	err := decoder.Decode(&params)
-// 	if err != nil {
-// 		respondWithError(w, http.StatusInternalServerError, "could not decode Email address")
-// 		return
-// 	}
-//
-// }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
 	if code > 499 {
@@ -173,4 +213,16 @@ func replaceBadWords(chirp string, badWords map[string]struct{}) string {
 		}
 	}
 	return strings.Join(wordsInChirp, " ")
+}
+
+func createJWT(secret string, id int, expirationTime int) (string, error) {
+	currentTime := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    "chirpy",
+		IssuedAt:  jwt.NewNumericDate(currentTime),
+		ExpiresAt: jwt.NewNumericDate(currentTime.Add(time.Second * time.Duration(expirationTime))),
+		Subject:   fmt.Sprintf("%d", id),
+	})
+
+	return token.SignedString([]byte(secret))
 }
