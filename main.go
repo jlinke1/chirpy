@@ -54,6 +54,7 @@ func main() {
 	apiRouter.Get("/chirps", apiCfg.getChirpsHandler)
 	apiRouter.Get("/chirps/{chirpID}", apiCfg.getSingleChirpHandler)
 	apiRouter.Post("/users", apiCfg.postUsersHandler)
+	apiRouter.Put("/users", apiCfg.putUsersHandler)
 	apiRouter.Post("/login", apiCfg.postLoginHandler)
 	r.Mount("/api", apiRouter)
 

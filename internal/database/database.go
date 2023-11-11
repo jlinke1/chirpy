@@ -105,7 +105,29 @@ func (db *DB) CreateUser(email string, password string) (User, error) {
 		return User{}, fmt.Errorf("CreateUser: could not write db: %w", err)
 	}
 	return userPW.GetUserWithoutPW(), nil
+}
 
+func (db *DB) UpdateUser(id int, newEmail, newPassword string) (User, error) {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return User{}, fmt.Errorf("UpdateUser: failed to load db: %w", err)
+	}
+
+	encryptedPW, err := bcrypt.GenerateFromPassword([]byte(newPassword), 10)
+	if err != nil {
+		return User{}, fmt.Errorf("UpdateUser: failed to encrypt password: %w", err)
+	}
+
+	userPW := dbStructure.Users[id]
+	userPW.Email = newEmail
+	userPW.Password = string(encryptedPW)
+	dbStructure.Users[id] = userPW
+
+	if err := db.writeDB(dbStructure); err != nil {
+		return User{}, fmt.Errorf("UpdateUser: failed to save db: %w", err)
+	}
+
+	return userPW.GetUserWithoutPW(), nil
 }
 
 func (db *DB) createDB() error {

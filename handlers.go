@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -75,27 +76,32 @@ func (cfg *apiConfig) postChirpsHandler(w http.ResponseWriter, r *http.Request) 
 	respondWithJSON(w, http.StatusCreated, newChirp)
 }
 
-func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
+func decodeUserRequest(data io.Reader) (string, string, error) {
 	type parameters struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
 
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(data)
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		log.Printf("error decoding User: %v\n", err)
-		respondWithError(w, http.StatusInternalServerError, "could not decode user")
-		return
+		return "", "", fmt.Errorf("decodeUserRequest: failed to decode: %w", err)
 	}
+
+	return params.Email, params.Password, nil
+}
+
+func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
+	email, password, err := decodeUserRequest(r.Body)
 
 	if err != nil {
 		log.Printf("decoding failed: %v\n", err)
 		respondWithError(w, http.StatusBadRequest, "failed to decode user provided params")
 		return
 	}
-	newUser, err := cfg.DB.CreateUser(params.Email, params.Password)
+
+	newUser, err := cfg.DB.CreateUser(email, password)
 	if err != nil {
 		log.Printf("could not save User: %v\n", err)
 		respondWithError(w, http.StatusInternalServerError, "could not save new user")
@@ -103,6 +109,52 @@ func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusCreated, newUser)
+}
+
+func (cfg *apiConfig) putUsersHandler(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	parsedToken, err := jwt.ParseWithClaims(
+		token,
+		&jwt.RegisteredClaims{},
+		func(token *jwt.Token) (interface{}, error) {
+			return []byte(cfg.jwtSecret), nil
+		})
+	if err != nil {
+		log.Printf("putUsersHandler: failed to parse token: %v", err)
+		respondWithError(w, http.StatusUnauthorized, "token invalid")
+		return
+	}
+
+	claims := parsedToken.Claims.(*jwt.RegisteredClaims)
+	userID, err := claims.GetSubject()
+	if err != nil {
+		log.Printf("putUsersHandler: failed to get UserID: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "something went wrong")
+		return
+	}
+
+	id, err := strconv.Atoi(userID)
+	if err != nil {
+		log.Printf("putUsersHandler: failed to parse ID: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "invalid ID")
+		return
+	}
+
+	newEmail, newPassword, err := decodeUserRequest(r.Body)
+	if err != nil {
+		log.Printf("putUsersHandler: decoding request failed: %v\n", err)
+		respondWithError(w, http.StatusBadRequest, "failed to decode user provided params")
+		return
+	}
+
+	updatedUser, err := cfg.DB.UpdateUser(id, newEmail, newPassword)
+	if err != nil {
+		log.Printf("putUsersHandler: updating user failed: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "update failed")
+	}
+
+	respondWithJSON(w, http.StatusOK, updatedUser)
+
 }
 
 func (cfg *apiConfig) postLoginHandler(w http.ResponseWriter, r *http.Request) {
