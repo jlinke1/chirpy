@@ -17,6 +17,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const (
+	accessExpirationTime  = 60 * 60
+	refreshExpirationTime = 60 * 24 * 60 * 60
+	accessIssuer          = "chirpy-access"
+	refreshIssuer         = "chirpy-refresh"
+)
+
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -111,21 +118,38 @@ func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusCreated, newUser)
 }
 
-func (cfg *apiConfig) putUsersHandler(w http.ResponseWriter, r *http.Request) {
+func extractClaims(r *http.Request, secret string) (string, *jwt.RegisteredClaims, error) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	parsedToken, err := jwt.ParseWithClaims(
 		token,
 		&jwt.RegisteredClaims{},
 		func(token *jwt.Token) (interface{}, error) {
-			return []byte(cfg.jwtSecret), nil
+			return []byte(secret), nil
 		})
 	if err != nil {
-		log.Printf("putUsersHandler: failed to parse token: %v", err)
-		respondWithError(w, http.StatusUnauthorized, "token invalid")
-		return
+		return "", nil, fmt.Errorf("extractClaims: failed to parse token %w", err)
 	}
 
 	claims := parsedToken.Claims.(*jwt.RegisteredClaims)
+
+	return token, claims, nil
+}
+
+func (cfg *apiConfig) putUsersHandler(w http.ResponseWriter, r *http.Request) {
+	_, claims, err := extractClaims(r, cfg.jwtSecret)
+	if err != nil {
+		log.Printf("putUsersHandler: failed to parse token: %v", err)
+		respondWithError(w, http.StatusUnauthorized, "token invalid")
+	}
+	issuer, err := claims.GetIssuer()
+	if issuer == refreshIssuer {
+		respondWithError(w, http.StatusUnauthorized, "provide an access token not a refresh token")
+	}
+	if err != nil {
+		log.Printf("putUsersHandler: failed to get issuer: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "oh boy!")
+	}
+
 	userID, err := claims.GetSubject()
 	if err != nil {
 		log.Printf("putUsersHandler: failed to get UserID: %v", err)
@@ -159,11 +183,9 @@ func (cfg *apiConfig) putUsersHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) postLoginHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
-
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
@@ -177,7 +199,11 @@ func (cfg *apiConfig) postLoginHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("Could not get user: %v\n", err)
 		if errors.Is(err, database.ErrNotExist) {
-			respondWithError(w, http.StatusNotFound, fmt.Sprintf("User with Email %s does not exist", params.Email))
+			respondWithError(
+				w,
+				http.StatusNotFound,
+				fmt.Sprintf("User with Email %s does not exist", params.Email),
+			)
 			return
 		}
 		respondWithError(w, http.StatusInternalServerError, "could not get user")
@@ -190,17 +216,63 @@ func (cfg *apiConfig) postLoginHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusUnauthorized, "wrong password")
 		return
 	}
-	expiresInSeconds := params.ExpiresInSeconds
-	if expiresInSeconds == 0 {
-		expiresInSeconds = 24 * 60 * 60
-	}
-	token, err := createJWT(cfg.jwtSecret, user.ID, expiresInSeconds)
+	accessToken, err := createJWT(cfg.jwtSecret, user.ID, accessExpirationTime, accessIssuer)
 	if err != nil {
 		log.Printf("failed to create token: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "token creation failed")
 	}
 
-	respondWithJSON(w, http.StatusOK, user.GetUserWithToken(token))
+	refreshToken, err := createJWT(cfg.jwtSecret, user.ID, refreshExpirationTime, refreshIssuer)
+	if err != nil {
+		log.Printf("failed to create token: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "token creation failed")
+	}
+
+	respondWithJSON(w, http.StatusOK, user.GetUserWithTokens(accessToken, refreshToken))
+}
+
+func (cfg *apiConfig) postRefreshHandler(w http.ResponseWriter, r *http.Request) {
+	tokenID, claims, err := extractClaims(r, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "retry later")
+	}
+	issuer, err := claims.GetIssuer()
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "invalid token")
+	}
+	if issuer != refreshIssuer {
+		respondWithError(w, http.StatusUnauthorized, "wrong token type")
+	}
+	_, err = cfg.DB.GetRefreshToken(tokenID)
+	if !errors.Is(err, database.ErrNotExist) {
+		respondWithError(w, http.StatusUnauthorized, "token already revoked")
+	}
+	userID, err := claims.GetSubject()
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "invalid token")
+	}
+	id, err := strconv.Atoi(userID)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "invalid token")
+	}
+	newToken, err := createJWT(cfg.jwtSecret, id, accessExpirationTime, accessIssuer)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong")
+	}
+	respondWithJSON(w, http.StatusOK, map[string]string{"token": newToken})
+}
+
+func (cfg *apiConfig) postRevokeHandler(w http.ResponseWriter, r *http.Request) {
+	token, _, err := extractClaims(r, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "retry later")
+	}
+	err = cfg.DB.RevokeRefreshToken(token, time.Now())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "oh man")
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
@@ -267,10 +339,10 @@ func replaceBadWords(chirp string, badWords map[string]struct{}) string {
 	return strings.Join(wordsInChirp, " ")
 }
 
-func createJWT(secret string, id int, expirationTime int) (string, error) {
+func createJWT(secret string, id int, expirationTime int, issuer string) (string, error) {
 	currentTime := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Issuer:    "chirpy",
+		Issuer:    issuer,
 		IssuedAt:  jwt.NewNumericDate(currentTime),
 		ExpiresAt: jwt.NewNumericDate(currentTime.Add(time.Second * time.Duration(expirationTime))),
 		Subject:   fmt.Sprintf("%d", id),

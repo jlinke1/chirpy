@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"golang.org/x/crypto/bcrypt"
 	"os"
 	"sync"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 var ErrNotExist = errors.New("resource does not exist")
@@ -17,8 +19,9 @@ type DB struct {
 }
 
 type DBStructure struct {
-	Chirps map[int]Chirp            `json:"chirps"`
-	Users  map[int]UserWithPassword `json:"users"`
+	Chirps        map[int]Chirp            `json:"chirps"`
+	Users         map[int]UserWithPassword `json:"users"`
+	RefreshTokens map[string]time.Time     `json:"refresh_tokens"`
 }
 
 type Chirp struct {
@@ -38,17 +41,23 @@ type UserWithPassword struct {
 }
 
 type UserWithToken struct {
-	ID    int    `json:"id"`
-	Email string `json:"email"`
-	Token string `json:"token"`
+	ID           int    `json:"id"`
+	Email        string `json:"email"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 func (u UserWithPassword) GetUserWithoutPW() User {
 	return User{ID: u.ID, Email: u.Email}
 }
 
-func (u UserWithPassword) GetUserWithToken(token string) UserWithToken {
-	return UserWithToken{ID: u.ID, Email: u.Email, Token: token}
+func (u UserWithPassword) GetUserWithTokens(token, refreshToken string) UserWithToken {
+	return UserWithToken{
+		ID:           u.ID,
+		Email:        u.Email,
+		Token:        token,
+		RefreshToken: refreshToken,
+	}
 }
 
 func NewDB(path string) (*DB, error) {
@@ -122,7 +131,6 @@ func (db *DB) UpdateUser(id int, newEmail, newPassword string) (User, error) {
 	userPW.Email = newEmail
 	userPW.Password = string(encryptedPW)
 	dbStructure.Users[id] = userPW
-
 	if err := db.writeDB(dbStructure); err != nil {
 		return User{}, fmt.Errorf("UpdateUser: failed to save db: %w", err)
 	}
@@ -130,10 +138,32 @@ func (db *DB) UpdateUser(id int, newEmail, newPassword string) (User, error) {
 	return userPW.GetUserWithoutPW(), nil
 }
 
+func (db *DB) RevokeRefreshToken(id string, expireTime time.Time) error {
+	revokeTime, err := db.GetRefreshToken(id)
+	if err == nil {
+		return fmt.Errorf("the token has already been revoked at %v", revokeTime)
+	}
+	if err != nil && !errors.Is(err, ErrNotExist) {
+		return fmt.Errorf("RevoceRefreshToken: could not verify that RefreshToken has not been revoked already")
+	}
+
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return fmt.Errorf("revokeRefreshToken: failed to load db: %w", err)
+	}
+	dbStructure.RefreshTokens[id] = time.Now()
+	if err := db.writeDB(dbStructure); err != nil {
+		return fmt.Errorf("RevokeRefreshToken: failed to save db: %w", err)
+	}
+
+	return nil
+}
+
 func (db *DB) createDB() error {
 	dbstructure := DBStructure{
-		Chirps: map[int]Chirp{},
-		Users:  map[int]UserWithPassword{},
+		Chirps:        map[int]Chirp{},
+		Users:         map[int]UserWithPassword{},
+		RefreshTokens: map[string]time.Time{},
 	}
 	return db.writeDB(dbstructure)
 }
@@ -219,6 +249,20 @@ func (db DB) GetChirp(chirpID int) (Chirp, error) {
 	}
 
 	return chirp, nil
+}
+
+func (db DB) GetRefreshToken(tokenID string) (time.Time, error) {
+	data, err := db.Load()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("GetRefreshToke: could not load db: %w", err)
+	}
+
+	revokeTime, ok := data.RefreshTokens[tokenID]
+	if !ok {
+		return time.Time{}, ErrNotExist
+	}
+
+	return revokeTime, nil
 }
 
 func (db DB) GetUserByMail(email string) (UserWithPassword, error) {
