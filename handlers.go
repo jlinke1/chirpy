@@ -52,13 +52,23 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) postChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := cfg.extractUserID(r)
+	if err != nil {
+		if errors.Is(err, ErrUnauthorized) {
+			respondWithError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		respondWithError(w, http.StatusInternalServerError, "something went wrong")
+		return
+	}
+
 	type parameters struct {
 		Body string `json:"body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		log.Printf("Error decoding Chirp: %v\n", err)
 		respondWithError(w, http.StatusInternalServerError, "could not decode Chirp")
@@ -74,7 +84,7 @@ func (cfg *apiConfig) postChirpsHandler(w http.ResponseWriter, r *http.Request) 
 	badWords := map[string]struct{}{"kerfuffle": {}, "sharbert": {}, "fornax": {}}
 	cleanedChirp := replaceBadWords(params.Body, badWords)
 
-	newChirp, err := cfg.DB.CreateChirp(cleanedChirp)
+	newChirp, err := cfg.DB.CreateChirp(cleanedChirp, id)
 	if err != nil {
 		log.Printf("could not save chirps: %v\n", err)
 		respondWithError(w, http.StatusInternalServerError, "could not save new chirp")
@@ -118,13 +128,13 @@ func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusCreated, newUser)
 }
 
-func extractClaims(r *http.Request, secret string) (string, *jwt.RegisteredClaims, error) {
+func (cfg *apiConfig) extractClaims(r *http.Request) (string, *jwt.RegisteredClaims, error) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	parsedToken, err := jwt.ParseWithClaims(
 		token,
 		&jwt.RegisteredClaims{},
 		func(token *jwt.Token) (interface{}, error) {
-			return []byte(secret), nil
+			return []byte(cfg.jwtSecret), nil
 		})
 	if err != nil {
 		return "", nil, fmt.Errorf("extractClaims: failed to parse token %w", err)
@@ -135,35 +145,41 @@ func extractClaims(r *http.Request, secret string) (string, *jwt.RegisteredClaim
 	return token, claims, nil
 }
 
-func (cfg *apiConfig) putUsersHandler(w http.ResponseWriter, r *http.Request) {
-	_, claims, err := extractClaims(r, cfg.jwtSecret)
+func (cfg *apiConfig) extractUserID(r *http.Request) (int, error) {
+	_, claims, err := cfg.extractClaims(r)
 	if err != nil {
-		log.Printf("putUsersHandler: failed to parse token: %v", err)
-		respondWithError(w, http.StatusUnauthorized, "token invalid")
+		return 0, fmt.Errorf("extractUserID: failed to extract claims: %w", err)
 	}
 	issuer, err := claims.GetIssuer()
 	if issuer == refreshIssuer {
-		respondWithError(w, http.StatusUnauthorized, "provide an access token not a refresh token")
+		return 0, ErrUnauthorized
 	}
 	if err != nil {
-		log.Printf("putUsersHandler: failed to get issuer: %v", err)
-		respondWithError(w, http.StatusInternalServerError, "oh boy!")
+		return 0, fmt.Errorf("extractUserID: failed to get issuer: %w", err)
 	}
 
 	userID, err := claims.GetSubject()
 	if err != nil {
-		log.Printf("putUsersHandler: failed to get UserID: %v", err)
-		respondWithError(w, http.StatusInternalServerError, "something went wrong")
-		return
+		return 0, fmt.Errorf("extractUserID: failed to get UserID: %w", err)
 	}
 
 	id, err := strconv.Atoi(userID)
 	if err != nil {
-		log.Printf("putUsersHandler: failed to parse ID: %v", err)
-		respondWithError(w, http.StatusInternalServerError, "invalid ID")
+		return 0, fmt.Errorf("extractUserID:failed to parse ID: %w", err)
+	}
+	return id, nil
+}
+
+func (cfg *apiConfig) putUsersHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := cfg.extractUserID(r)
+	if err != nil {
+		if errors.Is(err, ErrUnauthorized) {
+			respondWithError(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		respondWithError(w, http.StatusInternalServerError, "something went wrong")
 		return
 	}
-
 	newEmail, newPassword, err := decodeUserRequest(r.Body)
 	if err != nil {
 		log.Printf("putUsersHandler: decoding request failed: %v\n", err)
@@ -232,7 +248,7 @@ func (cfg *apiConfig) postLoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) postRefreshHandler(w http.ResponseWriter, r *http.Request) {
-	tokenID, claims, err := extractClaims(r, cfg.jwtSecret)
+	tokenID, claims, err := cfg.extractClaims(r)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "retry later")
 	}
@@ -263,7 +279,7 @@ func (cfg *apiConfig) postRefreshHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (cfg *apiConfig) postRevokeHandler(w http.ResponseWriter, r *http.Request) {
-	token, _, err := extractClaims(r, cfg.jwtSecret)
+	token, _, err := cfg.extractClaims(r)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "retry later")
 	}
@@ -350,3 +366,5 @@ func createJWT(secret string, id int, expirationTime int, issuer string) (string
 
 	return token.SignedString([]byte(secret))
 }
+
+var ErrUnauthorized = errors.New("Unauthorized: invalid token")
