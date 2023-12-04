@@ -15,6 +15,7 @@ type apiConfig struct {
 	fileServerHits int
 	DB             *database.DB
 	jwtSecret      string
+	polkaAPIKey    string
 }
 
 func main() {
@@ -37,10 +38,12 @@ func main() {
 	}
 
 	jwtSecret := os.Getenv("JWT_SECRET")
+	polkaAPIKey := os.Getenv("POLKA_API_KEY")
 	apiCfg := apiConfig{
 		fileServerHits: 0,
 		DB:             db,
 		jwtSecret:      jwtSecret,
+		polkaAPIKey:    polkaAPIKey,
 	}
 	r := chi.NewRouter()
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filePathRoot))))
@@ -53,11 +56,13 @@ func main() {
 	apiRouter.Post("/chirps", apiCfg.postChirpsHandler)
 	apiRouter.Get("/chirps", apiCfg.getChirpsHandler)
 	apiRouter.Get("/chirps/{chirpID}", apiCfg.getSingleChirpHandler)
+	apiRouter.Delete("/chirps/{chirpID}", apiCfg.deleteChirpHandler)
 	apiRouter.Post("/users", apiCfg.postUsersHandler)
 	apiRouter.Put("/users", apiCfg.putUsersHandler)
 	apiRouter.Post("/login", apiCfg.postLoginHandler)
 	apiRouter.Post("/refresh", apiCfg.postRefreshHandler)
 	apiRouter.Post("/revoke", apiCfg.postRevokeHandler)
+	apiRouter.Post("/polka/webhooks", apiCfg.postPolkaWebhooksHandler)
 	r.Mount("/api", apiRouter)
 
 	adminRouter := chi.NewRouter()

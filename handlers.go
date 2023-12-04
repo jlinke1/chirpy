@@ -13,15 +13,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jlinke1/chirpy/internal/auth"
 	"github.com/jlinke1/chirpy/internal/database"
-	"golang.org/x/crypto/bcrypt"
 )
 
 const (
-	accessExpirationTime  = 60 * 60
-	refreshExpirationTime = 60 * 24 * 60 * 60
-	accessIssuer          = "chirpy-access"
-	refreshIssuer         = "chirpy-refresh"
+	accessExpirationTime  = time.Hour
+	refreshExpirationTime = 60 * 24 * time.Hour
 )
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
@@ -128,8 +126,7 @@ func (cfg *apiConfig) postUsersHandler(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, http.StatusCreated, newUser)
 }
 
-func (cfg *apiConfig) extractClaims(r *http.Request) (string, *jwt.RegisteredClaims, error) {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+func (cfg *apiConfig) parseToken(token string) (*jwt.RegisteredClaims, error) {
 	parsedToken, err := jwt.ParseWithClaims(
 		token,
 		&jwt.RegisteredClaims{},
@@ -137,10 +134,19 @@ func (cfg *apiConfig) extractClaims(r *http.Request) (string, *jwt.RegisteredCla
 			return []byte(cfg.jwtSecret), nil
 		})
 	if err != nil {
-		return "", nil, fmt.Errorf("extractClaims: failed to parse token %w", err)
+		return nil, fmt.Errorf("parseToken: failed to parse token %w", err)
 	}
 
 	claims := parsedToken.Claims.(*jwt.RegisteredClaims)
+	return claims, nil
+}
+
+func (cfg *apiConfig) extractClaims(r *http.Request) (string, *jwt.RegisteredClaims, error) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	claims, err := cfg.parseToken(token)
+	if err != nil {
+		return "", nil, fmt.Errorf("extractClaims: failed: %w", err)
+	}
 
 	return token, claims, nil
 }
@@ -151,7 +157,7 @@ func (cfg *apiConfig) extractUserID(r *http.Request) (int, error) {
 		return 0, fmt.Errorf("extractUserID: failed to extract claims: %w", err)
 	}
 	issuer, err := claims.GetIssuer()
-	if issuer == refreshIssuer {
+	if issuer == auth.RefreshIssuer {
 		return 0, ErrUnauthorized
 	}
 	if err != nil {
@@ -225,20 +231,19 @@ func (cfg *apiConfig) postLoginHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusInternalServerError, "could not get user")
 		return
 	}
-
-	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(params.Password))
+	err = auth.CheckPasswordHash(params.Password, user.Password)
 	if err != nil {
 		log.Printf("password comparison failed: %v", err)
 		respondWithError(w, http.StatusUnauthorized, "wrong password")
 		return
 	}
-	accessToken, err := createJWT(cfg.jwtSecret, user.ID, accessExpirationTime, accessIssuer)
+	accessToken, err := auth.CreateJWT(cfg.jwtSecret, user.ID, accessExpirationTime, auth.AccessIssuer)
 	if err != nil {
 		log.Printf("failed to create token: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "token creation failed")
 	}
 
-	refreshToken, err := createJWT(cfg.jwtSecret, user.ID, refreshExpirationTime, refreshIssuer)
+	refreshToken, err := auth.CreateJWT(cfg.jwtSecret, user.ID, refreshExpirationTime, auth.RefreshIssuer)
 	if err != nil {
 		log.Printf("failed to create token: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "token creation failed")
@@ -248,30 +253,26 @@ func (cfg *apiConfig) postLoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) postRefreshHandler(w http.ResponseWriter, r *http.Request) {
-	tokenID, claims, err := cfg.extractClaims(r)
+	refreshToken, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "retry later")
+		respondWithError(w, http.StatusBadRequest, "Couldn't find JWT")
+		return
 	}
-	issuer, err := claims.GetIssuer()
+
+	isRevoked, err := cfg.DB.IsRevoked(refreshToken)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "invalid token")
+		respondWithError(w, http.StatusInternalServerError, "could not check tokens")
+		return
 	}
-	if issuer != refreshIssuer {
-		respondWithError(w, http.StatusUnauthorized, "wrong token type")
-	}
-	_, err = cfg.DB.GetRefreshToken(tokenID)
-	if !errors.Is(err, database.ErrNotExist) {
+	if isRevoked {
 		respondWithError(w, http.StatusUnauthorized, "token already revoked")
+		return
 	}
-	userID, err := claims.GetSubject()
+
+	newToken, err := auth.RefreshToken(refreshToken, cfg.jwtSecret)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, "invalid token")
 	}
-	id, err := strconv.Atoi(userID)
-	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "invalid token")
-	}
-	newToken, err := createJWT(cfg.jwtSecret, id, accessExpirationTime, accessIssuer)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "something went wrong")
 	}
@@ -292,6 +293,22 @@ func (cfg *apiConfig) postRevokeHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	authorID := r.URL.Query().Get("author_id")
+	if authorID != "" {
+		parsedAuthorID, err := strconv.Atoi(authorID)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "invalid authorID")
+			return
+		}
+		chirps, err := cfg.DB.GetChirpsByAuthor(parsedAuthorID)
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "could not load chirps by author")
+			return
+		}
+		respondWithJSON(w, http.StatusOK, chirps)
+		return
+	}
+
 	chirps, err := cfg.DB.GetChirps()
 	if err != nil {
 		log.Printf("could not load chirps: %v", err)
@@ -300,6 +317,46 @@ func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	respondWithJSON(w, http.StatusOK, chirps)
 
+}
+
+func (cfg *apiConfig) deleteChirpHandler(w http.ResponseWriter, r *http.Request) {
+	accessToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	claims, err := cfg.parseToken(accessToken)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "tststs")
+	}
+
+	chirpID, err := strconv.Atoi(chi.URLParam(r, "chirpID"))
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "invalid chripID")
+		return
+	}
+
+	chirp, err := cfg.DB.GetChirp(chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, fmt.Sprintf("there is no Chirp with ID %d", chirpID))
+	}
+
+	user, err := claims.GetSubject()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong")
+		return
+	}
+
+	if user != strconv.Itoa(chirp.AuthorID) {
+		respondWithError(w, http.StatusForbidden, "you are not the author of this chirp")
+		return
+	}
+	err = cfg.DB.DeleteChirp(chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not delete chirp")
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (cfg *apiConfig) getSingleChirpHandler(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +376,44 @@ func (cfg *apiConfig) getSingleChirpHandler(w http.ResponseWriter, r *http.Reque
 	}
 
 	respondWithJSON(w, http.StatusOK, chirp)
+}
+
+func (cfg *apiConfig) postPolkaWebhooksHandler(w http.ResponseWriter, r *http.Request) {
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil || apiKey != cfg.polkaAPIKey {
+		respondWithError(w, http.StatusUnauthorized, "invalid apiKey")
+		return
+	}
+
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID int `json:"user_id"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	var params parameters
+	err = decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "failed to parse parameters")
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		respondWithJSON(w, http.StatusOK, nil)
+	}
+
+	err = cfg.DB.UpgradeUser(params.Data.UserID)
+	if errors.Is(err, database.ErrNotExist) {
+		respondWithError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "something went wrong")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, nil)
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -353,18 +448,6 @@ func replaceBadWords(chirp string, badWords map[string]struct{}) string {
 		}
 	}
 	return strings.Join(wordsInChirp, " ")
-}
-
-func createJWT(secret string, id int, expirationTime int, issuer string) (string, error) {
-	currentTime := time.Now()
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Issuer:    issuer,
-		IssuedAt:  jwt.NewNumericDate(currentTime),
-		ExpiresAt: jwt.NewNumericDate(currentTime.Add(time.Second * time.Duration(expirationTime))),
-		Subject:   fmt.Sprintf("%d", id),
-	})
-
-	return token.SignedString([]byte(secret))
 }
 
 var ErrUnauthorized = errors.New("Unauthorized: invalid token")

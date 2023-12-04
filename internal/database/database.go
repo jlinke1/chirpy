@@ -19,9 +19,9 @@ type DB struct {
 }
 
 type DBStructure struct {
-	Chirps        map[int]Chirp            `json:"chirps"`
-	Users         map[int]UserWithPassword `json:"users"`
-	RefreshTokens map[string]time.Time     `json:"refresh_tokens"`
+	Chirps      map[int]Chirp            `json:"chirps"`
+	Users       map[int]UserWithPassword `json:"users"`
+	Revocations map[string]Revocation    `json:"revocations"`
 }
 
 type Chirp struct {
@@ -31,14 +31,16 @@ type Chirp struct {
 }
 
 type User struct {
-	ID    int    `json:"id"`
-	Email string `json:"email"`
+	ID          int    `json:"id"`
+	Email       string `json:"email"`
+	IsChirpyRed bool   `json:"is_chirpy_red"`
 }
 
 type UserWithPassword struct {
-	ID       int    `json:"id"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	ID          int    `json:"id"`
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	IsChirpyRed bool   `json:"is_chirpy_red"`
 }
 
 type UserWithToken struct {
@@ -46,6 +48,7 @@ type UserWithToken struct {
 	Email        string `json:"email"`
 	Token        string `json:"token"`
 	RefreshToken string `json:"refresh_token"`
+	IsChirpyRed  bool   `json:"is_chirpy_red"`
 }
 
 func (u UserWithPassword) GetUserWithoutPW() User {
@@ -58,6 +61,7 @@ func (u UserWithPassword) GetUserWithTokens(token, refreshToken string) UserWith
 		Email:        u.Email,
 		Token:        token,
 		RefreshToken: refreshToken,
+		IsChirpyRed:  u.IsChirpyRed,
 	}
 }
 
@@ -140,32 +144,30 @@ func (db *DB) UpdateUser(id int, newEmail, newPassword string) (User, error) {
 	return userPW.GetUserWithoutPW(), nil
 }
 
-func (db *DB) RevokeRefreshToken(id string, expireTime time.Time) error {
-	revokeTime, err := db.GetRefreshToken(id)
-	if err == nil {
-		return fmt.Errorf("the token has already been revoked at %v", revokeTime)
-	}
-	if err != nil && !errors.Is(err, ErrNotExist) {
-		return fmt.Errorf("RevoceRefreshToken: could not verify that RefreshToken has not been revoked already")
-	}
-
+func (db *DB) UpgradeUser(id int) error {
 	dbStructure, err := db.loadDB()
 	if err != nil {
-		return fmt.Errorf("revokeRefreshToken: failed to load db: %w", err)
-	}
-	dbStructure.RefreshTokens[id] = time.Now()
-	if err := db.writeDB(dbStructure); err != nil {
-		return fmt.Errorf("RevokeRefreshToken: failed to save db: %w", err)
+		return fmt.Errorf("UpgradeUser: failed to load db: %w", err)
 	}
 
+	user, ok := dbStructure.Users[id]
+	if !ok {
+		return ErrNotExist
+	}
+
+	user.IsChirpyRed = true
+	dbStructure.Users[user.ID] = user
+	if err := db.writeDB(dbStructure); err != nil {
+		return fmt.Errorf("UpgradeUser: failed to savs db: %w", err)
+	}
 	return nil
 }
 
 func (db *DB) createDB() error {
 	dbstructure := DBStructure{
-		Chirps:        map[int]Chirp{},
-		Users:         map[int]UserWithPassword{},
-		RefreshTokens: map[string]time.Time{},
+		Chirps:      map[int]Chirp{},
+		Users:       map[int]UserWithPassword{},
+		Revocations: map[string]Revocation{},
 	}
 	return db.writeDB(dbstructure)
 }
@@ -239,6 +241,21 @@ func (db DB) GetChirps() ([]Chirp, error) {
 	return chirps, nil
 }
 
+func (db *DB) GetChirpsByAuthor(authorID int) ([]Chirp, error) {
+	database, err := db.Load()
+	if err != nil {
+		return nil, fmt.Errorf("GetChirpsByAuthor: could not load database: %w", err)
+	}
+
+	chirps := []Chirp{}
+	for _, chirp := range database.Chirps {
+		if chirp.AuthorID == authorID {
+			chirps = append(chirps, chirp)
+		}
+	}
+	return chirps, nil
+}
+
 func (db DB) GetChirp(chirpID int) (Chirp, error) {
 	data, err := db.Load()
 	if err != nil {
@@ -253,18 +270,28 @@ func (db DB) GetChirp(chirpID int) (Chirp, error) {
 	return chirp, nil
 }
 
+func (db DB) DeleteChirp(chirpID int) error {
+	data, err := db.Load()
+	if err != nil {
+		return fmt.Errorf("DeleteChirp: could not load DB: %w", err)
+	}
+
+	delete(data.Chirps, chirpID)
+	return nil
+}
+
 func (db DB) GetRefreshToken(tokenID string) (time.Time, error) {
 	data, err := db.Load()
 	if err != nil {
 		return time.Time{}, fmt.Errorf("GetRefreshToke: could not load db: %w", err)
 	}
 
-	revokeTime, ok := data.RefreshTokens[tokenID]
+	revokecation, ok := data.Revocations[tokenID]
 	if !ok {
 		return time.Time{}, ErrNotExist
 	}
 
-	return revokeTime, nil
+	return revokecation.RevokedAt, nil
 }
 
 func (db DB) GetUserByMail(email string) (UserWithPassword, error) {
