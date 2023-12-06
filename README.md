@@ -1,5 +1,10 @@
 # chirpy
 This project was build following the boot.dev Learn Webservers course.
+It is a basic Twitter/X clone.
+
+## Why I wrote it 
+I followed the course and built this project to learn more about Backend Engineering.
+Especially about Go and how to built web servers.
 
 ## ⚙️ Installation 
 `go install github.com/jlinke1/chirpy@latest`
