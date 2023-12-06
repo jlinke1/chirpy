@@ -293,6 +293,9 @@ func (cfg *apiConfig) postRevokeHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	sort := r.URL.Query().Get("sort")
+	descending := sort == "desc"
+
 	authorID := r.URL.Query().Get("author_id")
 	if authorID != "" {
 		parsedAuthorID, err := strconv.Atoi(authorID)
@@ -300,7 +303,7 @@ func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 			respondWithError(w, http.StatusBadRequest, "invalid authorID")
 			return
 		}
-		chirps, err := cfg.DB.GetChirpsByAuthor(parsedAuthorID)
+		chirps, err := cfg.DB.GetChirpsByAuthor(parsedAuthorID, descending)
 		if err != nil {
 			respondWithError(w, http.StatusInternalServerError, "could not load chirps by author")
 			return
@@ -309,7 +312,7 @@ func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chirps, err := cfg.DB.GetChirps()
+	chirps, err := cfg.DB.GetChirps(descending)
 	if err != nil {
 		log.Printf("could not load chirps: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "could not load chirps")

@@ -228,7 +228,7 @@ func (db DB) Load() (DBStructure, error) {
 	return database, nil
 }
 
-func (db DB) GetChirps() ([]Chirp, error) {
+func (db DB) GetChirps(descending bool) ([]Chirp, error) {
 	database, err := db.Load()
 	if err != nil {
 		return nil, fmt.Errorf("GetAllChrips: could not load data: %w", err)
@@ -238,10 +238,23 @@ func (db DB) GetChirps() ([]Chirp, error) {
 	for _, chirp := range database.Chirps {
 		chirps = append(chirps, chirp)
 	}
+
+	if descending {
+		descendingChirps := db.reverseOrder(chirps)
+		return descendingChirps, nil
+	}
 	return chirps, nil
 }
 
-func (db *DB) GetChirpsByAuthor(authorID int) ([]Chirp, error) {
+func (db *DB) reverseOrder(chirps []Chirp) []Chirp {
+	chirpsDescending := []Chirp{}
+	for _, chirp := range chirps {
+		chirpsDescending = append([]Chirp{chirp}, chirpsDescending...)
+	}
+	return chirpsDescending
+}
+
+func (db *DB) GetChirpsByAuthor(authorID int, descending bool) ([]Chirp, error) {
 	database, err := db.Load()
 	if err != nil {
 		return nil, fmt.Errorf("GetChirpsByAuthor: could not load database: %w", err)
@@ -252,6 +265,10 @@ func (db *DB) GetChirpsByAuthor(authorID int) ([]Chirp, error) {
 		if chirp.AuthorID == authorID {
 			chirps = append(chirps, chirp)
 		}
+	}
+	if descending {
+		chirpsDescending := db.reverseOrder(chirps)
+		return chirpsDescending, nil
 	}
 	return chirps, nil
 }
